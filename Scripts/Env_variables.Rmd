@@ -1,0 +1,226 @@
+---
+title: "Environmental data downloading and processing"
+author: "Moritz Klaassen"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This walkthrough shows a reproducible pipeline for working with marine environmental data in R. By the end you’ll have:
+
+- Imported local raster and vector layers.
+- Discovered and downloaded global marine predictor variables with sdmpredictors.
+- Learned to crop rasters to any region
+- Combined presence–absence (PA) points with extracted environmental values.
+- Saved a tidy CSV ready for species distribution modelling.
+
+Most chunks are self-contained and can be run one-by-one. Feel free to adapt paths, layer codes, or regions to match your own project.
+
+For this part, you will need the following packages: We rely on the terra package for raster operations and sdmpredictors to download our environmental data
+
+```{r, message=FALSE, warning=FALSE}
+library(terra)
+library(sdmpredictors)
+```
+
+Set working directory 
+```{r}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+```
+
+# Import local raster layers
+
+Firstly, if we have our environmental data already downloaded, we can simply load it into our session. This includes a variety of file types such as .asc, .ncd, .tif, .shp .. 
+Lets load data for depth and slope in the Azores! 
+
+```{r}
+bathy_example <- terra::rast("data/depth_2km.asc")   # bathymetry
+slope_example <- terra::rast("data/slope_2km.asc")   # slope
+
+plot(bathy_example, main = "Bathymetry (2 km)")
+plot(slope_example,  main = "Slope (2 km)")
+```
+
+# Download from direct link
+
+We can also import a zipped shapefile straight from GitHub—here, global shipping lanes:
+
+```{r}
+ship_routes <- vect(
+  "https://github.com/newzealandpaul/Shipping-Lanes/raw/main/data/Shipping-Lanes-v1/Shipping-Lanes-v1.shp"
+)
+
+plot(ship_routes, main = "Global Shipping Lanes")
+```
+
+# Import environmental data through sdmpredictors package
+
+In the following, we will focus on downloading environmental data through the *sdmpredictors* package. This package  lets you browse, filter and instantly download a wide range of ready-to-use environmental layers — terrestrial and marine predictors — from global collections such as Bio-ORACLE, MARSPEC and WorldClim. With a couple of lines of code you can list available variables, pick just the layers you need (e.g. mean sea-surface temperature or dissolved oxygen), and fetch them as  *SpatRaster* or *Raster* objects.
+
+```{r}
+all_datasets <- list_datasets(terrestrial = TRUE, marine = TRUE)
+head(all_datasets)
+```
+above we see the collections from where we can download our environmental data. Since we are not interested in terrestrial data, lets set terrestrial to false!
+
+```{r}
+marine_datasets <- list_datasets(terrestrial = FALSE, marine = TRUE)
+head(marine_datasets)
+```
+
+As we see, we have two collections of data available, MARSPEC and Bio-Oracle. Importantly, whenever you use this kind of data for publication, make sure to cite it! 
+
+```{r}
+subset(marine_datasets, select = c("dataset_code", "citation"))
+```
+
+With the list_layers function of the sdmpredictors package, we can see all the environmental layers that we have available for download 
+
+```{r}
+marine_layers <- sdmpredictors::list_layers(datasets = marine_datasets)
+```
+
+Now, let us download and plot three MARSPEC layers. We will check out bathymetry, sea-surface salinity and temperature
+
+```{r, message=FALSE, warning=FALSE}
+marspec_codes <- c(
+  "MS_bathy_5m",                  # bathymetry
+  "MS_biogeo08_sss_mean_5m",      # mean sea-surface salinity
+  "MS_biogeo13_sst_mean_5m"       # mean sea-surface temperature
+)
+
+marspec_data <- sdmpredictors::load_layers(
+  marspec_codes,
+  datadir = "outputs/sdmpredictors/marspec"
+)
+
+terra::plot(marspec_data)
+```
+
+Next, let's do the same for the Bio-Oracle data. You might have noticed that Bio-Oracle has more environmental layers available. Besides bathymetry, salinity, and temperature, let's download chlorophyll a, a very important predictor for cetaceans!
+
+```{r, message=FALSE, warning=FALSE}
+bioracle_codes <- c(
+  "BO_bathymean",
+  "BO_salinity",
+  "BO_sstmean",
+  "BO2_chlomean_bdmin"
+)
+bioracle_data <- sdmpredictors::load_layers(
+  bioracle_codes,
+  datadir = "outputs/sdmpredictors/bioracle"
+)
+# Plot the Bio-ORACLE stack:
+terra::plot(bioracle_data, main = names(bioracle_data))
+
+```
+
+In the next step, since we have been using global maps of environmental data so far, but in most cases we don't work on a global scale, we will crop our study extent. Here we will crop the extent to three island groups in the NE Atlantic, but feel free to adapt to your study extent of interest! 
+
+```{r, message=FALSE, warning=FALSE}
+
+# We have to convert our bioracle_data from a rasterStack to a SpatRaster to continue working in terra 
+bioracle_data <- terra::rast(bioracle_data)
+
+azores_extent   <- ext(-32, -22, 33, 42)
+canaries_extent <- ext(-20, -13, 26, 30)
+madeira_extent  <- ext(-18, -16, 32, 34)
+
+azores_bio   <- crop(bioracle_data, azores_extent)
+canaries_bio <- crop(bioracle_data, canaries_extent)
+madeira_bio  <- crop(bioracle_data, madeira_extent)
+
+plot(azores_bio,   main = "Azores – Bio-ORACLE")
+plot(canaries_bio, main = "Canaries – Bio-ORACLE")
+plot(madeira_bio,  main = "Madeira – Bio-ORACLE")
+```
+
+You see how we go to smaller spatial extents, the grids become increasingly visible? Let's find out our grid resolution! 
+
+```{r, message=FALSE, warning=FALSE}
+res(bioracle_data)
+```
+
+Our layers are stored at 5 arc-minutes, about 9 × 9 km near the equator.
+
+# 7 Combine PA points with environmental predictors
+
+Finally, we'll walk through a straightforward way to merge environmental predictor values with your presence-absence points, leaving you with an analysis-ready dataset for modelling.
+
+```{r}
+pa_data <- read.csv(
+  "data/presence_absence_dataset.csv",
+  stringsAsFactors = FALSE
+)
+head(pa_data)
+```
+
+We will explain this dataset structure in more detail later, for now what's important is that if PA = 1, it stands for a presence. If PA = 0, it stands for an absence record. lat and lon refer to latitude and longitude in degrees, and x and y are the corresponding coordinates in meters. 
+
+Next, we have to turn the dataframe *pa_data* to a spatial object: 
+
+```{r}
+pa_points <- vect(
+  pa_data,
+  geom = c("lon", "lat"),
+  crs  = "EPSG:4326"     # WGS-84
+)
+```
+
+Let's have a quick look at our *pa_points* 
+
+```{r pa-point-plot, fig.width=6, fig.height=4}
+# Split into absence vs presence
+absences  <- pa_points[pa_points$PA == 0, ]
+presences <- pa_points[pa_points$PA == 1, ]
+
+# 1) Plot absences (blue) first
+terra::plot(
+  absences,
+  col   = "skyblue",
+  pch   = 20,
+  main  = "Sampling points: Absence (blue) then Presence (red)",
+  xlab  = "Longitude",
+  ylab  = "Latitude"
+)
+
+# 2) Add presences (red) on top
+terra::plot(
+  presences,
+  add   = TRUE,
+  col   = "firebrick",
+  pch   = 20
+)
+```
+Perfect! Now remember, for each absence (blue) and presence (red) location, we want to know our environmental conditions. We can do this with the following code: 
+
+```{r}
+env_values <- terra::extract(
+  x    = bioracle_data,
+  y    = pa_points,
+  bind = FALSE
+)
+head(env_values)
+
+pa_env <- cbind(
+  pa_data,
+  env_values[, -1, drop = FALSE]  # drop the extract() ID column
+)
+head(pa_env)
+
+# 7.6 Save combined presence–absence + environmental dataset:
+write.csv(
+  pa_env,
+  file      = "outputs/pa_env_data.csv",
+  row.names = FALSE
+)
+```
+
+SCRIPT COMPLETE! 🎉 We now have our data ready for modelling! 
+
+
+
