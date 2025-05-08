@@ -1,0 +1,508 @@
+---
+title: "ECS R workshop - Presence Absence Models for a dolphin species"
+author: "Miguel P. Martins"
+date: "2025-05-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This is a step by step guide on how to do presence-absence models to understand the ecological niche of a species. Following this, you will be able to understand how environmental variables relate to the species occurrence. This will give you a probability of occurrence given environmental conditions, which you can then project into space and time to understand a species potential distribution. In this example we will model the occurrence of a dolphin species along mainland Portugal's coast.
+
+For this you'll need to read the following packages, which you should have previously installed:
+
+```{r, message=FALSE, warning=FALSE}
+library(readr)
+library(mgcv)
+library(ggplot2)
+library(viridis)
+library(pROC)
+library(latex2exp)
+library(geodata)
+library(tidyterra)
+library(marmap)
+library(cowplot)
+library(ggspatial)
+library(metR)
+```
+
+If you don't have any of them, please install them, using the install.packages command.
+
+
+```{r}
+setwd("C:/Users/mpmar/OneDrive/Documents/Aulas/workshop")
+```
+
+
+
+# Import dataset for modelling
+```{r, message=FALSE}
+data <- read_csv("Datasets/presence_abesence_dataset.csv")
+
+
+```
+
+
+
+## Summarise the dataset
+
+
+
+```{r}
+summary(data)
+```
+
+In the dataset we have an ID column, which is just a column with the observation IDs. A column called PA, which stands for presence absence. If PA = 1, it stands for a presence. If PA = 0, it stands for an absence record. The mean value for PA is 0.02342. This means that for every 100 sampling points, in around 2, the target species was present. We can also think of this as the species prevalence along the sampling effort. We have information regarding the dates, with day, month and year columns. We also have geographical information, through the lat and lon columns (standing for latitude and longitude, respectively) and the x and y columns, which are projections of the latitude and longitude. Why is x and y useful? Because the Earth isn't flat, although some people may disagree. Latitude and longitude are useful to have an idea on how things look, however, when predicting things in space, especially if we need to account for area ($km^2$), it's more accurate to use x and y coordinates. Their units are also different. Latitude and longitude are in degrees, while x and y are in meters.
+
+We then have explanatory variables. We have seafloor slope, in degrees, seafloor depth in meters, the sardine captures in tones in the year of the record. The chlorophyll-a concentration ($mg/m^3$) in the day of the record, in the week of the record, the day one month before the record, and the week one month before the record. Sea surface temperature (ºC) in the day and week of the record, and salinity ($10^{-3}$) in the day and week of the record. When I say week of the record, I mean the average value in 8 days of the environmental variable, in the record's location. For modelling, we will use values with a weekly resolution, however, you can try by yourselves a daily resolution and see what happens.
+
+
+
+## Map observations
+
+Although we are mapping a marine species, it is useful to have landmass shapefiles when mapping its occurrence.
+
+```{r, message=FALSE}
+pt  <- geodata::gadm(country = "PRT", level = 0,  path=tempdir())
+spain <- geodata::gadm(country = "ESP", level = 0,  path=tempdir())
+morocco <- geodata::gadm(country = "MAR", level = 0,  path=tempdir())
+```
+
+This chunk of code allows us to download shapefiles of countries. The *geodata* package is really cool for getting shapefiles. The country argument is asking you for the three letter code of the country, which you can find in https://en.wikipedia.org/wiki/List_of_ISO_3166_country_codes. Setting the level argument to 0, gives you a file of the country only. Increasing the level will create more subdivisions within the country, giving you important political regions. The path argument is set as a temporary directory because I don't want to download these shapefiles anywhere. Nevertheless, that may be useful to you, so you can set a directory to download these files. 
+
+With these shapefiles alone you can now make this sort of map:
+```{r}
+map <- ggplot()+
+  geom_spatvector(data=pt, fill="grey20") + 
+  geom_spatvector(data=spain,fill="grey70")+
+  geom_spatvector(data=morocco,fill="grey70")+
+  theme_bw()+theme(panel.grid=element_blank())+ 
+  xlim(-14,-6.5)+ ylim(34.6,42)+ 
+  labs( x = "Longitude", y = "Latitude") 
+
+map  
+```
+
+geom_spatvector allows to plot spatvector objects, fill gives the color, here I chose to make Portugal darker. xlim and ylim constrain the limits of the map around the sampled area.
+
+It would also be interesting to have bathymetric lines to know the depths in the study area
+
+```{r, message=FALSE}
+b = getNOAA.bathy(lon1 = -14, lon2 = -6.5, lat1 = 34.6, lat2 = 42, 
+                  resolution = 1)
+
+bf = fortify.bathy(b)
+```
+
+
+This code allows to download bathymetry data, which is useful for mapping stuff!
+
+```{r,message=FALSE, warning=FALSE}
+map <- ggplot()+
+  geom_contour(data = bf,
+               aes(x = x, y = y, z = z),
+               breaks = -100,
+               size = 0.3,
+               colour = "lightblue1")+
+  geom_contour(data = bf,
+               aes(x = x, y = y, z = z),
+               breaks = -500,
+               size = 0.3,
+               colour = "lightblue2")+
+    geom_contour(data = bf,
+               aes(x = x, y = y, z = z),
+               breaks = -1000,
+               size = 0.3,
+               colour = "lightblue3")+
+      geom_contour(data = bf,
+               aes(x = x, y = y, z = z),
+               breaks = -2000,
+               size = 0.3,
+               colour = "#4292C6")+
+        geom_contour(data = bf,
+               aes(x = x, y = y, z = z),
+               breaks = -4000,
+               size = 0.3,
+               colour = "#08519C")+
+          geom_contour(data = bf,
+               aes(x = x, y = y, z = z),
+               breaks = -5000,
+               size = 0.3,
+               colour = "#08306B")+
+  geom_spatvector(data=pt, fill="grey20") +
+  geom_spatvector(data=spain,fill="grey70")+
+  geom_spatvector(data=morocco,fill="grey70")+
+  theme_bw()+theme(panel.grid=element_blank())+ 
+  xlim(-14,-6.5)+ ylim(34.6,42)+
+  labs( x = "Longitude", y = "Latitude")
+
+map  
+```
+
+Here you can see the isobathymetric lines for -100m, -500m, -1000m, -2000m, -4000m and -5000m. The lines get darker as the seafloor is deeper.
+
+Now mapping the presences and absences
+```{r, message=FALSE, warning=FALSE}
+absences  <- data[data$PA == 0, ]
+presences <- data[data$PA == 1, ]
+
+# 1) plot absences (blue) first
+
+map <- map + 
+  geom_point(data = absences, aes(x= lon ,y= lat), pch = 20, color="skyblue")
+# 2) Add presences
+
+map <- map +
+  geom_point(data = presences, aes(x= lon ,y= lat), pch = 20, color= "firebrick")
+
+map
+
+```
+
+If you think the map doesn't read well, try changing the colors and size of the points.
+
+There are still a few things we can do to improve this map, for example, adding a scale and a north arrow:
+
+```{r, message=FALSE, warning=FALSE}
+
+#1) Add the north arrow
+map <- map + 
+  annotation_north_arrow(location = "tl", which_north = "true", 
+                         pad_x = unit(0.1, "in"), pad_y = unit(0.1, "in"),
+                         style = north_arrow_fancy_orienteering)
+
+#2) Add the scale
+map <- map +
+  annotation_scale(location = "br", width_hint = 0.5)
+map
+```
+
+
+
+Now that we have everything mapped out, do you think the species is coastal or prefers deeper waters? Whatever you think, we will confirm with our models.
+
+# Modelling
+
+
+The simplest regression model we could try would be the linear regression. But there is a problem. Linear models assume that the variable we want to model follows a normal distribution - which would mean numeric continuous values. This is not our case. Since we are trying to model the presence-absence of a dolphin species, in other words, success or failure, we should use a binomial distribution. 
+
+
+
+## GLM presence-absence model
+
+For that, the simplest regression model we can try is a Generalized Linear Model (GLM), where the variable we want to model follows a binomial distribution. You can also call this a logistic regression. As the name implies, GLMs are generalizations of the linear model, and allow the modeled data to follow distributions other than the normal.
+
+### Fitting the model
+
+
+```{r}
+glm1 <- glm(formula = PA ~ slope + depth + sardine_captures + Chl_week + Chl_week_lag + SST_week + Salt_week, data = data, family = binomial(link = "logit"))
+```
+
+To fit a GLM we run the glm function. We start by writing the model's formula which is, in our case, "PA ~ slope + depth + sardine_captures + Chl_week + Chl_week_lag + SST_week + Salt_week". This means that we are modelling the presence absence of our dolphin species as a function of the variables we add to the model. We then have to give the data that the model will use and the family that our response variable (PA) follows. The link argument refers to the link function, which is something that we are not going to cover in detail here. But, to give you an idea, imagine that this model is fitted as a sum of several lines, then the link function, which in this case is the logit link function, is used to transform the model results into units that make sense, here from 0 to 1.
+
+### Interpreting the model output
+
+We can use the summary function to interpret the model's results in depth
+
+```{r}
+summary(glm1)
+```
+
+
+The summary of our model gives us the code we used to fit it in Call.
+
+Coefficients gives us the information that is most relevant for us. The Intercept term is something that you can mostly ignore. We then have the variables we considered for modelling our species occurrence. 
+
+Let's interpret the numbers that are next to them:
+
+* The **Estimate** is the coefficient for the variable. While the number doesn't reflect the effect size, it's signal is important for us to know if it's a positive or negative relation with the species occurrence. For example, slope has a positive number. This means that, according to this model, the dolphin prefers high seafloor slope. On the other hand, SST has a negative value, which means that the dolphin prefers lower water temperature, meaning, colder waters. You may be confused as to why depth has a positive value, and that is because depth ranges from negative numbers all the way to zero. This means that our dolphin prefers shallower waters - as higher depth values mean values closer to zero (shallow water).
+
+* The **Std. Error** gives us a measure of uncertainty. If it is very small, in comparison to the Estimate value, then our Estimate is likely precise. If it is very big, then our Estimate for that variable is likely not very reliable.
+
+* The **z value** is the test statistic, which we are going to overlook for now. For those of you who have never heard the term it is what helps us determine if the variable's effect is different from 0 or not, i.e., if there is an effect or not.
+
+* The **Pr (>|z|)** is the p-value associated to the test statistic. The p-value is the probability of obtaining a test statistic as extreme or more than the one we obtained, under the assumption that $H_0$, our null hypothesis, is true. The null hypothesis for each variable is that it has no effect in the dolphin occurrence, or that its effect equals to 0. If the p-value is very low, then it is not likely that we would obtain a more extreme test statistic, if the null hypothesis is true. This would mean that it would be unlikely that the variable does not affect the dolphin's occurrence. In other words, we have evidence to reject the null hypothesis in favor of the alternative - that the variable as an effect on the dolphin occurrence. This may seem hard to grasp, but to simplify, let's look into our output. For example, slope has a p-value of 3.33e-09, which is very low. This means that, according to our model, it is unlikely that slope doesn't affect the dolphin's occurrence and that we can procede assuming that it does. If we consider a level of significance $\alpha = 0.05$, then we would reject the null hypothesis whenever the p-value is lower than 0.05 and not reject it when it is higher. If a variable has a high p-value, meaning it likely has no effect on the dolphins occurrence, like sardine_captures, then we can try and remove it.
+
+
+
+```{r}
+glm2 <- glm(formula = PA ~ slope + depth + Chl_week + Chl_week_lag + SST_week + Salt_week, data = data, family = binomial(link = "logit"))
+```
+
+We will be able to see if our new model is better than the previous if its AIC score, which you can see in the summary, decreases. It is generally considered that if the difference between AIC scores of two models is greater than 2, then it is a significant difference.
+
+```{r}
+summary(glm2)
+```
+
+The AIC in the second model is 10723, this is a drop in 2 in relation to the previous model, so we can consider that this model is statistically better than the previous.
+
+### Projecting model results in space
+
+We can now project the model results in space.
+
+#### Importing prediction grids
+
+First, we need to import the prediction grids.
+
+```{r, message=FALSE}
+spring_grid <- read_csv("prediction_grids/portugalgrid_2020_spring.csv")
+summer_grid <- read_csv("prediction_grids/portugalgrid_2020_summer.csv")
+autumn_grid <- read_csv("prediction_grids/portugalgrid_2020_autumn.csv")
+winter_grid <- read_csv("prediction_grids/portugalgrid_2020_winter.csv")
+```
+
+Here we have four grids, each of them representing the environmental conditions in Portuguese waters during spring, summer, autumn and winter of 2020. Something very important to keep in mind, every prediction grid needs to have all the variables you used for modelling, if one is missing, then the model will not work.
+
+#### Doing predictions
+
+Now we are going to use the predict.glm function to predict our model results. Let's add a new column to each of our prediction grids called GLM_Prob. You can name it however you want, but I chose this name as this will be the probability of the dolphin occurring in the area according to the GAM.
+
+Let's start with our prediction grid
+
+```{r}
+spring_grid$GLM_Prob <- predict.glm(glm2, newdata = spring_grid, type = "response")
+```
+
+
+We start by giving the name of the model we want to use, then we give the newdata which is our prediction grid. We finalize by expressing what type of prediction we want to get, setting that argument as the responde weill give us values in the same scale as our response variable, i.e., between 0 and 1.
+
+#### Mapping the Presence Probability
+
+We can now plot the occurrence probability of the species.
+
+```{r}
+spring_plot <- ggplot(spring_grid) +
+  geom_tile(aes(x = x, y = y, fill = GLM_Prob)) + 
+  labs(title = "Spring Distribution")+
+  scale_fill_viridis()
+
+spring_plot
+```
+
+The way to interpret this map is that the more yellow, the higher the presence probability, and as the color goes to dark blue, it becomes less probable that the species would occur there. These colors come from the scale_fill_viridis(), from the viridis package which is a colorblind friendly package.
+
+This map would benefit from having Portugal and other countries there, so let's add them. First we need to reproject them into the same spatial scale as the prediction grid:
+
+```{r}
+r_crs2 = "+proj=laea +lat_0=38.993572 +lon_0=-16.523438 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+
+pt_proj <- terra::project(pt, r_crs2)
+spain_proj <- terra::project(spain, r_crs2)
+morocco_proj <- terra::project(morocco, r_crs2)
+```
+
+r_crs2 gives us the projection string that the prediction grid uses. In other contexts you'll have to know or find the right projection for your grids.
+
+```{r}
+spring_plot <- ggplot(spring_grid) +
+  geom_tile(aes(x = x, y = y, fill = GLM_Prob)) + 
+  labs(title = "Spring Distribution")+
+  scale_fill_viridis()+
+  geom_spatvector(data = pt_proj, fill = "grey70")+
+  geom_spatvector(data = spain_proj, fill = "grey35")+
+  geom_spatvector(data = morocco_proj, fill = "grey35")+
+  xlim(min(spring_grid$x), max(spring_grid$x))+
+  ylim(min(spring_grid$y), max(spring_grid$y))
+
+spring_plot
+```
+
+Now it looks much better!
+
+We can do the same process for the other grids and plto all of them together.
+
+Prediction:
+
+```{r}
+summer_grid$GLM_Prob <- predict.glm(glm2, newdata = summer_grid, type = "response")
+autumn_grid$GLM_Prob <- predict.glm(glm2, newdata = autumn_grid, type = "response")
+winter_grid$GLM_Prob <- predict.glm(glm2, newdata = winter_grid, type = "response")
+```
+
+Creating the plots:
+
+```{r}
+summer_plot <- ggplot(summer_grid) +
+  geom_tile(aes(x = x, y = y, fill = GLM_Prob)) + 
+  labs(title = "Summer Distribution")+
+  scale_fill_viridis()+
+  geom_spatvector(data = pt_proj, fill = "grey70")+
+  geom_spatvector(data = spain_proj, fill = "grey35")+
+  geom_spatvector(data = morocco_proj, fill = "grey35")+
+  xlim(min(summer_grid$x), max(summer_grid$x))+
+  ylim(min(summer_grid$y), max(summer_grid$y))
+
+autumn_plot <- ggplot(autumn_grid) +
+  geom_tile(aes(x = x, y = y, fill = GLM_Prob)) + 
+  labs(title = "Autumn Distribution")+
+  scale_fill_viridis()+
+  geom_spatvector(data = pt_proj, fill = "grey70")+
+  geom_spatvector(data = spain_proj, fill = "grey35")+
+  geom_spatvector(data = morocco_proj, fill = "grey35")+
+  xlim(min(autumn_grid$x), max(autumn_grid$x))+
+  ylim(min(autumn_grid$y), max(autumn_grid$y))
+
+winter_plot <- ggplot(winter_grid) +
+  geom_tile(aes(x = x, y = y, fill = GLM_Prob)) + 
+  labs(title = "Winter Distribution")+
+  scale_fill_viridis()+
+  geom_spatvector(data = pt_proj, fill = "grey70")+
+  geom_spatvector(data = spain_proj, fill = "grey35")+
+  geom_spatvector(data = morocco_proj, fill = "grey35")+
+  xlim(min(winter_grid$x), max(winter_grid$x))+
+  ylim(min(winter_grid$y), max(winter_grid$y))
+```
+
+
+Plot them all together now:
+
+```{r}
+plot_grid(spring_plot, summer_plot, autumn_plot, winter_plot, labels = "AUTO")
+```
+
+
+Now we we were able to show how the dolphin's distribution changes seasonally in space. However, we used a model that assumes linear relationships between the explanatory variables and the presence-absence of the species. This might not be the case. In fact, a lot of times there are ups and downs in the environmental preferences that a species has. Let's do more flexible models.
+
+## GAM presence-absence model
+
+The Generalized Additive Models (GAMs) are generalizations of GLMs, where the relationship between variables is not necessarily linear. We use smooth functions, s(), of each variable to smooth out the response curve. Let's see how it goes
+
+### Fitting the model
+
+```{r}
+gam1 <- gam(formula = PA ~ s(slope) + s(depth) + s(sardine_captures) + s(Chl_week) + s(Chl_week_lag) + s(SST_week) + s(Salt_week), data = data, family = binomial(link = "logit"))
+```
+
+As you can see, the code is very similar to the GLM, with the difference being that we create smooth functions of each variable.
+
+### Plotting response curves and interpreting the model output
+
+
+```{r}
+summary(gam1)
+```
+
+The GAM summary is, however, different from the GLM. In this, I want you to focus on the p-value. The interpretation ins the same as in the GLM. In the case of our model, the smooth functions of all variables have very low p-values, suggesting that all of them have an effect on the dolphin's occurrence.
+
+To see that effect, we can plot the model's response curves. Note, the code to plot the response curves will not show in the html file, but it is in the R Markdown file and in the slides.
+
+
+```{r, echo=FALSE}
+par(mfrow  = c(2,2))
+
+plot.gam(gam1, select=1, all.terms=T, shade=T, xlab=TeX(r'(Slope (degrees))'), ylab="Presence probability", trans =  plogis)
+plot.gam(gam1, select=2, all.terms=T, shade=T, xlab="Seafloor depth (m)", ylab="Presence probability", trans =  plogis)
+plot.gam(gam1, select=3, all.terms=T, shade=T, xlab="Yearly sardine captures (tons)", ylab="Presence probability", trans =  plogis)
+plot.gam(gam1, select=4, all.terms=T, shade=T, xlab=TeX(r'(Chlorophyll-a ($mg/m^3$))'), ylab="Presence probability", trans =  plogis)
+plot.gam(gam1, select=5, all.terms=T, shade=T, xlab=TeX(r'(Chlorophyll-a ($mg/m^3$) one month prior )'), ylab="Presence probability", trans =  plogis)
+plot.gam(gam1, select=6, all.terms=T, shade=T, xlab=TeX(r'(Sea Surface Temperature (Celsius))'), ylab="Presence probability", trans =  plogis)
+plot.gam(gam1, select=7, all.terms=T, shade=T, xlab="Salinity", ylab="Presence probability", trans =  plogis)
+```
+
+To interpret these outputs, the black line represents the estimated trend, and the grey ribbons represent the standard error associated to it. We can clearly see the relationships between the environmental variables and the dolphin occurrence. However, some relationships seem a bit weird. For example, it's hard to make any sense out of the response curve for salinity. The response curves for the seafloor depth and the sardine captures are also very wiggly. We can change this, of course, and the way to do it is by restricting the maximum degrees of freedom for the variables' smooths. In other words we are going to restrict the model complexity.
+
+### Restricting model complexity
+
+The parameter that gives us the maximum degrees of freedom in a variable's smooth is k. By default it takes the value of 10. We can increase it or decrease it by adding it in the smooth function in our formula. Let's change the k value of all our variables to 4.
+
+```{r}
+gam2 <- gam(PA ~ s(slope, k = 4) + s(depth, k = 4) + s(sardine_captures, k = 4) + s(Chl_week, k = 4) + s(Chl_week_lag, k = 4) + s(SST_week, k = 4) + s(Salt_week, k = 4), data = data, family = binomial(link = "logit"))
+```
+
+Note: You don't have to change the k value to all the variables, neither does the value have to be the same to all of them, there is plenty of wiggle room here for you to play around. Try it out yourselves later and see whate happens.
+
+Let's see the model summary
+
+```{r}
+summary(gam2)
+```
+
+In this new model, slope is no longer statistically significant if $\alpha = 0.05$ has its p-value is greater than 0.05. We could remove it, but I leave that up to you. Try it out for yourselves later.
+
+Now, let's finally see if the response curves have changed:
+
+```{r, echo =FALSE}
+par(mfrow  = c(2,2))
+
+plot.gam(gam2, select=1, all.terms=T, shade=T, xlab=TeX(r'(Slope (degrees))'), ylab="Presence probability", trans =  plogis)
+plot.gam(gam2, select=2, all.terms=T, shade=T, xlab="Seafloor depth (m)", ylab="Presence probability", trans =  plogis)
+plot.gam(gam2, select=3, all.terms=T, shade=T, xlab="Yearly sardine captures (tons)", ylab="Presence probability", trans =  plogis)
+plot.gam(gam2, select=4, all.terms=T, shade=T, xlab=TeX(r'(Chlorophyll-a ($mg/m^3$))'), ylab="Presence probability", trans =  plogis)
+plot.gam(gam2, select=5, all.terms=T, shade=T, xlab=TeX(r'(Chlorophyll-a ($mg/m^3$) one month prior )'), ylab="Presence probability", trans =  plogis)
+plot.gam(gam2, select=6, all.terms=T, shade=T, xlab=TeX(r'(Sea Surface Temperature (Celsius))'), ylab="Presence probability", trans =  plogis)
+plot.gam(gam2, select=7, all.terms=T, shade=T, xlab="Salinity", ylab="Presence probability", trans =  plogis)
+```
+
+Now all the smooths are less wiggly and seem more reasonable from an ecological point of view. Let's use this model to project the results into space!
+
+### Projecting model results into space
+
+#### Prediction
+
+Since we are working with a gam, instead of using the predict.glm function, we should use the predict.gam function:
+
+```{r}
+spring_grid$GAM_Prob <- predict.gam(gam2, newdata = spring_grid, type = "response")
+summer_grid$GAM_Prob <- predict.gam(gam2, newdata = summer_grid, type = "response")
+autumn_grid$GAM_Prob <- predict.gam(gam2, newdata = autumn_grid, type = "response")
+winter_grid$GAM_Prob <- predict.gam(gam2, newdata = winter_grid, type = "response")
+```
+
+
+#### Plotting
+
+
+```{r}
+spring_plot2 <- ggplot(spring_grid) +
+  geom_tile(aes(x = x, y = y, fill = GAM_Prob)) + 
+  labs(title = "Spring Distribution")+
+  scale_fill_viridis()+
+  geom_spatvector(data = pt_proj, fill = "grey70")+
+  geom_spatvector(data = spain_proj, fill = "grey35")+
+  geom_spatvector(data = morocco_proj, fill = "grey35")+
+  xlim(min(spring_grid$x), max(spring_grid$x))+
+  ylim(min(spring_grid$y), max(spring_grid$y))
+
+summer_plot2 <- ggplot(summer_grid) +
+  geom_tile(aes(x = x, y = y, fill = GAM_Prob)) + 
+  labs(title = "Summer Distribution")+
+  scale_fill_viridis()+
+  geom_spatvector(data = pt_proj, fill = "grey70")+
+  geom_spatvector(data = spain_proj, fill = "grey35")+
+  geom_spatvector(data = morocco_proj, fill = "grey35")+
+  xlim(min(summer_grid$x), max(summer_grid$x))+
+  ylim(min(summer_grid$y), max(summer_grid$y))
+
+autumn_plot2 <- ggplot(autumn_grid) +
+  geom_tile(aes(x = x, y = y, fill = GAM_Prob)) + 
+  labs(title = "Autumn Distribution")+
+  scale_fill_viridis()+
+  geom_spatvector(data = pt_proj, fill = "grey70")+
+  geom_spatvector(data = spain_proj, fill = "grey35")+
+  geom_spatvector(data = morocco_proj, fill = "grey35")+
+  xlim(min(autumn_grid$x), max(autumn_grid$x))+
+  ylim(min(autumn_grid$y), max(autumn_grid$y))
+
+winter_plot2 <- ggplot(winter_grid) +
+  geom_tile(aes(x = x, y = y, fill = GAM_Prob)) + 
+  labs(title = "Winter Distribution")+
+  scale_fill_viridis()+
+  geom_spatvector(data = pt_proj, fill = "grey70")+
+  geom_spatvector(data = spain_proj, fill = "grey35")+
+  geom_spatvector(data = morocco_proj, fill = "grey35")+
+  xlim(min(winter_grid$x), max(winter_grid$x))+
+  ylim(min(winter_grid$y), max(winter_grid$y))
+```
+
+
+Plot them all together now:
+
+```{r}
+plot_grid(spring_plot2, summer_plot2, autumn_plot2, winter_plot2, labels = "AUTO")
+```
+
+We have plotted our new predictions. Compare them with the ones from the GLM. What dou you think? The results are a bit different but the models still predicts higher presence probability closer to the coast, but there is now a noticeable range contraction during the summer, when compared to the other seasons.
